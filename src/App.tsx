@@ -398,7 +398,7 @@ function LedgerPage({ store, setStore, monthKey, locked }: { store: Store; setSt
     const headers = ['No','구분','업체명','업체코드','대표자','업태','업종','등록번호','공급가액','세액','합계금액','결제여부','비고'];
     const body = rows.map((r, i) => { const v = store.vendors.find(v => v.id === r.vendorId); return [i + 1, r.category, v?.name ?? '', v?.code ?? '', v?.ceo ?? '', v?.businessType ?? '', v?.businessItem ?? '', v?.registrationNo ?? '', r.supply, r.tax, r.supply + r.tax, r.payment, r.note]; });
     body.push([]); body.push(['', '상품 및 외주가공 합계 (a)', '', '', '', '', '', '', '', '', a]); body.push(['', '부자재 미결제분', '', '', '', '', '', '', '', '', unpaid]); body.push(['', '부자재 결제완료', '', '', '', '', '', '', '', '', paid]); body.push(['', '부자재 소계 (b)', '', '', '', '', '', '', '', '', b]); body.push(['', '총 매입 합계 (a+b)', '', '', '', '', '', '', '', '', a + b]);
-    const escape = (value: string | number) => `"${String(value).replaceAll('\"', '\"\"')}"`;
+    const escape = (value: string | number) => `"${String(value).replace(/,/g, "")
     const csv = '\ufeff' + [headers, ...body].map(row => row.map(escape).join(',')).join('\n');
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' }); const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = `${monthKey}-매입세금계산서-집계장.csv`; link.click(); URL.revokeObjectURL(url);
   };
