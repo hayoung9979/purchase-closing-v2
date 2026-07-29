@@ -312,9 +312,16 @@ function MonthlyPage({ store, setStore, monthKey, locked }: { store: Store; setS
   const [query, setQuery] = useState('');
   const [sort, setSort] = useState<'name' | 'category' | 'status'>('name');
   const [showAdd, setShowAdd] = useState(false);
+  const [addQuery, setAddQuery] = useState('');
   const [detailId, setDetailId] = useState<string | null>(null);
   const [working, setWorking] = useState(false);
   const rows = store.monthly[monthKey] ?? [];
+  const availableVendors = store.vendors.filter((vendor) => {
+    if (rows.some((row) => row.vendorId === vendor.id)) return false;
+    const keyword = addQuery.trim().toLocaleLowerCase('ko-KR');
+    if (!keyword) return true;
+    return [vendor.name, vendor.code, vendor.category].some((value) => value.toLocaleLowerCase('ko-KR').includes(keyword));
+  });
   const statusOf = (r: MonthlyVendor): Status => { const n = r.checklist.filter(c => c.checked).length; return n === 0 ? '미진행' : n === 7 ? '완료' : '진행중'; };
   const filtered = [...rows].filter(r => (store.vendors.find(v => v.id === r.vendorId)?.name ?? '').includes(query)).sort((a,b) => {
     const va = store.vendors.find(v => v.id === a.vendorId)!; const vb = store.vendors.find(v => v.id === b.vendorId)!;
@@ -332,16 +339,22 @@ function MonthlyPage({ store, setStore, monthKey, locked }: { store: Store; setS
       alert(`체크리스트 생성 실패: ${checklistResult.error.message}`); setWorking(false); return;
     }
     const ledgerResult = await supabase.from('ledger_rows').insert({ month_key: monthKey, category: vendor.category, vendor_id: vendorId, supply: 0, tax: 0, payment: '미결제', note: '' }).select().single();
-    if (ledgerResult.error) { alert(`집계장 자동 추가 실패: ${ledgerResult.error.message}`); }
+    if (ledgerResult.error) {
+      await supabase.from('monthly_vendors').delete().eq('id', monthlyResult.data.id);
+      alert(`집계장 자동 추가 실패로 전체 작업을 취소했습니다: ${ledgerResult.error.message}`);
+      setWorking(false);
+      return;
+    }
     const newMonthly: MonthlyVendor = {
       id: monthlyResult.data.id, vendorId, updatedAt: monthlyResult.data.updated_at,
       checklist: (checklistResult.data ?? []).sort((a,b) => a.sort_order-b.sort_order).map(item => ({ id:item.id, name:item.item_name, checked:item.checked, missingDate:item.missing_date ?? '' }))
     };
-    const nextStore: Store = { ...store, monthly: { ...store.monthly, [monthKey]: [...rows, newMonthly] } };
-    if (!ledgerResult.error) {
-      nextStore.ledger = { ...store.ledger, [monthKey]: [...(store.ledger[monthKey] ?? []), { id: ledgerResult.data.id, category: ledgerResult.data.category as Category, vendorId: ledgerResult.data.vendor_id, supply: Number(ledgerResult.data.supply), tax: Number(ledgerResult.data.tax), payment: ledgerResult.data.payment as Payment, note: ledgerResult.data.note ?? '' }] };
-    }
-    setStore(nextStore); setShowAdd(false); setWorking(false);
+    const nextStore: Store = {
+      ...store,
+      monthly: { ...store.monthly, [monthKey]: [...rows, newMonthly] },
+      ledger: { ...store.ledger, [monthKey]: [...(store.ledger[monthKey] ?? []), { id: ledgerResult.data.id, category: ledgerResult.data.category as Category, vendorId: ledgerResult.data.vendor_id, supply: Number(ledgerResult.data.supply), tax: Number(ledgerResult.data.tax), payment: ledgerResult.data.payment as Payment, note: ledgerResult.data.note ?? '' }] },
+    };
+    setStore(nextStore); setShowAdd(false); setAddQuery(''); setWorking(false);
   };
   const updateChecklist = async (rowId: string, index: number, patch: Partial<ChecklistItem>) => {
     if (locked) return;
@@ -352,15 +365,59 @@ function MonthlyPage({ store, setStore, monthKey, locked }: { store: Store; setS
     const nextRows = rows.map(r => r.id === rowId ? { ...r, updatedAt: new Date().toISOString(), checklist: r.checklist.map((c,i) => i === index ? nextItem : c) } : r);
     setStore({ ...store, monthly: { ...store.monthly, [monthKey]: nextRows } });
     const { error } = await supabase.from('checklist_items').update({ checked: nextItem.checked, missing_date: nextItem.missingDate || null }).eq('id', item.id);
-    if (error) { alert(`체크리스트 저장 실패: ${error.message}`); return; }
+    if (error) {
+      setStore({ ...store, monthly: { ...store.monthly, [monthKey]: rows } });
+      alert(`체크리스트 저장 실패: ${error.message}`);
+      return;
+    }
     await supabase.from('monthly_vendors').update({ updated_at: new Date().toISOString() }).eq('id', rowId);
+  };
+  const removeMonthlyVendor = async (row: MonthlyVendor) => {
+    if (locked || working) return;
+    const vendor = store.vendors.find(v => v.id === row.vendorId);
+    const vendorName = vendor?.name ?? '선택한 거래처';
+    if (!confirm(`${vendorName}를 ${monthKey} 월별 마감 현황에서 삭제할까요?\n\n체크리스트와 같은 달 집계장 내역도 함께 삭제됩니다.`)) return;
+
+    setWorking(true);
+    const { error: monthlyError } = await supabase.from('monthly_vendors').delete().eq('id', row.id);
+    if (monthlyError) {
+      alert(`월별 마감 거래처 삭제 실패: ${monthlyError.message}`);
+      setWorking(false);
+      return;
+    }
+
+    const { error: ledgerError } = await supabase
+      .from('ledger_rows')
+      .delete()
+      .eq('month_key', monthKey)
+      .eq('vendor_id', row.vendorId);
+
+    const nextMonthlyRows = rows.filter(r => r.id !== row.id);
+    const currentLedgerRows = store.ledger[monthKey] ?? [];
+    const nextLedgerRows = ledgerError
+      ? currentLedgerRows
+      : currentLedgerRows.filter(ledgerRow => ledgerRow.vendorId !== row.vendorId);
+
+    setStore({
+      ...store,
+      monthly: { ...store.monthly, [monthKey]: nextMonthlyRows },
+      ledger: { ...store.ledger, [monthKey]: nextLedgerRows },
+    });
+    if (detailId === row.id) setDetailId(null);
+    setWorking(false);
+
+    if (ledgerError) {
+      alert(`월별 마감 거래처는 삭제됐지만 집계장 내역 삭제에 실패했습니다: ${ledgerError.message}`);
+      return;
+    }
+    alert(`${vendorName}가 삭제되었습니다.`);
   };
   const detail = rows.find(r => r.id === detailId);
   const detailVendor = detail ? store.vendors.find(v => v.id === detail.vendorId) : undefined;
   return <>
     <div className="toolbar"><div className="search"><Search size={17}/><input placeholder="거래처명 검색" value={query} onChange={e => setQuery(e.target.value)}/></div><select value={sort} onChange={e => setSort(e.target.value as typeof sort)}><option value="name">거래처명순</option><option value="category">분류순</option><option value="status">마감상태순</option></select><button className="primary" onClick={() => setShowAdd(true)} disabled={locked || working}><Plus size={16}/> 거래처 추가</button></div>
-    <div className="panel table-panel"><table><thead><tr><th>거래처명</th><th>분류</th><th>진행률</th><th>누락</th><th>마감상태</th><th>최근 수정</th><th></th></tr></thead><tbody>{filtered.map(r => { const v = store.vendors.find(v => v.id === r.vendorId)!; const done = r.checklist.filter(c => c.checked).length; const missing = r.checklist.filter(c => !c.checked); const status = statusOf(r); return <tr key={r.id} onClick={() => setDetailId(r.id)} className="clickable"><td><b>{v?.name}</b><small>{v?.code}</small></td><td><span className="category-chip">{v?.category}</span></td><td><div className="progress-cell"><div><span style={{width:`${done/7*100}%`}}/></div><b>{done}/7</b></div></td><td>{missing.length ? <span className="missing">{missing.length}건</span> : <span className="complete">없음</span>}</td><td><StatusBadge status={status}/></td><td>{new Date(r.updatedAt).toLocaleDateString('ko-KR')}</td><td><ChevronRight size={17}/></td></tr>})}</tbody></table>{!filtered.length && <Empty text="검색 결과가 없습니다." />}</div>
-    {showAdd && <Modal title="거래처 정보에서 추가" onClose={() => !working && setShowAdd(false)}><div className="select-list">{store.vendors.filter(v => !rows.some(r => r.vendorId === v.id)).map(v => <button key={v.id} disabled={working} onClick={() => void addVendor(v.id)}><div><b>{v.name}</b><small>{v.code} · {v.category}</small></div><Plus size={17}/></button>)}{store.vendors.every(v => rows.some(r => r.vendorId === v.id)) && <Empty text="추가 가능한 거래처가 없습니다." />}</div></Modal>}
+    <div className="panel table-panel"><table><thead><tr><th>거래처명</th><th>분류</th><th>진행률</th><th>누락</th><th>마감상태</th><th>최근 수정</th><th>삭제</th><th></th></tr></thead><tbody>{filtered.map(r => { const v = store.vendors.find(v => v.id === r.vendorId)!; const done = r.checklist.filter(c => c.checked).length; const missing = r.checklist.filter(c => !c.checked); const status = statusOf(r); return <tr key={r.id} onClick={() => setDetailId(r.id)} className="clickable"><td><b>{v?.name}</b><small>{v?.code}</small></td><td><span className="category-chip">{v?.category}</span></td><td><div className="progress-cell"><div><span style={{width:`${done/7*100}%`}}/></div><b>{done}/7</b></div></td><td>{missing.length ? <span className="missing">{missing.length}건</span> : <span className="complete">없음</span>}</td><td><StatusBadge status={status}/></td><td>{new Date(r.updatedAt).toLocaleDateString('ko-KR')}</td><td><button className="monthly-delete-button" disabled={locked || working} title={locked ? '마감 잠금 해제 후 삭제할 수 있습니다.' : `${v?.name ?? '거래처'} 삭제`} onClick={e => { e.stopPropagation(); void removeMonthlyVendor(r); }}><Trash2 size={15}/> 삭제</button></td><td><ChevronRight size={17}/></td></tr>})}</tbody></table>{!filtered.length && <Empty text="검색 결과가 없습니다." />}</div>
+    {showAdd && <Modal title="거래처 정보에서 추가" onClose={() => { if (!working) { setShowAdd(false); setAddQuery(''); } }}><div className="modal-search search"><Search size={17}/><input autoFocus placeholder="업체명·코드·분류 검색" value={addQuery} onChange={e => setAddQuery(e.target.value)}/></div><div className="select-list">{availableVendors.map(v => <button key={v.id} disabled={working} onClick={() => void addVendor(v.id)}><div><b>{v.name}</b><small>{v.code || '코드 없음'} · {v.category}</small></div><Plus size={17}/></button>)}{!availableVendors.length && <Empty text={addQuery ? "검색 결과가 없습니다." : "추가 가능한 거래처가 없습니다."} />}</div></Modal>}
     {detail && detailVendor && <Modal title={detailVendor.name} onClose={() => setDetailId(null)} wide><div className="detail-summary"><div><small>현재 상태</small><StatusBadge status={statusOf(detail)}/></div><div><small>진행률</small><b>{Math.round(detail.checklist.filter(c=>c.checked).length/7*100)}%</b></div><div><small>최근 수정</small><b>{new Date(detail.updatedAt).toLocaleString('ko-KR')}</b></div></div><div className="checklist">{detail.checklist.map((c,i) => <div key={c.id ?? c.name} className={c.checked ? 'done' : ''}><label><input type="checkbox" checked={c.checked} disabled={locked} onChange={e => void updateChecklist(detail.id, i, { checked: e.target.checked, missingDate: e.target.checked ? '' : c.missingDate })}/><span>{c.checked && <Check size={15}/>}</span><b>{c.name}</b></label>{!c.checked && <div className="missing-date"><span>누락일</span><input type="date" value={c.missingDate} disabled={locked} onChange={e => void updateChecklist(detail.id, i, { missingDate: e.target.value })}/></div>}</div>)}</div>{locked && <div className="locked-note"><Lock size={16}/> 월 마감되어 수정할 수 없습니다.</div>}</Modal>}
   </>;
 }
@@ -472,6 +529,18 @@ function VendorsPage({ store, setStore }: { store: Store; setStore: (s: Store) =
   const edit=(v:Vendor)=>{setMessage('');setForm(v);setOpen(true)};
   const remove=async(id:string)=>{
     const vendor=store.vendors.find(v=>v.id===id);
+    const [monthlyUsage, ledgerUsage] = await Promise.all([
+      supabase.from('monthly_vendors').select('id', { count: 'exact', head: true }).eq('vendor_id', id),
+      supabase.from('ledger_rows').select('id', { count: 'exact', head: true }).eq('vendor_id', id),
+    ]);
+    if (monthlyUsage.error || ledgerUsage.error) {
+      alert(`사용 여부 확인 실패: ${monthlyUsage.error?.message ?? ledgerUsage.error?.message}`);
+      return;
+    }
+    if ((monthlyUsage.count ?? 0) > 0 || (ledgerUsage.count ?? 0) > 0) {
+      alert(`${vendor?.name ?? '거래처'}는 월별 마감 또는 집계장에서 사용 중이라 삭제할 수 없습니다.`);
+      return;
+    }
     if(!confirm(`${vendor?.name ?? '거래처'} 정보를 삭제할까요?`)) return;
     const { error } = await supabase.from('vendors').delete().eq('id', id);
     if(error){ alert(`삭제 실패: ${error.message}`); return; }
