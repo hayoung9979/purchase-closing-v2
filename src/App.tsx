@@ -38,7 +38,7 @@ type Vendor = {
   phone?: string;
 };
 
-type ChecklistItem = { id?: string; name: string; checked: boolean; missingDate: string };
+type ChecklistItem = { id?: string; name: string; checked: boolean; missingDate: string; missingDates: string[] };
 type MonthlyVendor = { id: string; vendorId: string; checklist: ChecklistItem[]; updatedAt: string };
 type LedgerRow = {
   id: string;
@@ -69,13 +69,13 @@ const seedVendors: Vendor[] = [
   { id: 'v3', category: '부자재', name: '세림상사', code: 'M-003', ceo: '최대표', businessType: '도소매업', businessItem: '부자재', registrationNo: '345-67-89012', manager: '정하늘', phone: '010-7777-8888' },
 ];
 
-const blankChecklist = (): ChecklistItem[] => checklistNames.map((name) => ({ name, checked: false, missingDate: '' }));
+const blankChecklist = (): ChecklistItem[] => checklistNames.map((name) => ({ name, checked: false, missingDate: '', missingDates: [] }));
 const seedStore: Store = {
   vendors: seedVendors,
   monthly: {
     [currentKey]: [
-      { id: 'm1', vendorId: 'v1', checklist: checklistNames.map((name, i) => ({ name, checked: i < 4, missingDate: i === 4 ? `${currentKey}-18` : '' })), updatedAt: new Date().toISOString() },
-      { id: 'm2', vendorId: 'v2', checklist: checklistNames.map((name, i) => ({ name, checked: i < 7, missingDate: '' })), updatedAt: new Date().toISOString() },
+      { id: 'm1', vendorId: 'v1', checklist: checklistNames.map((name, i) => ({ name, checked: i < 4, missingDate: i === 4 ? `${currentKey}-18` : '', missingDates: i === 4 ? [`${currentKey}-18`] : [] })), updatedAt: new Date().toISOString() },
+      { id: 'm2', vendorId: 'v2', checklist: checklistNames.map((name, i) => ({ name, checked: i < 7, missingDate: '', missingDates: [] })), updatedAt: new Date().toISOString() },
     ],
   },
   ledger: {
@@ -163,7 +163,7 @@ export default function App() {
       const [monthlyResult, ledgerResult] = await Promise.all([
         supabase
           .from('monthly_vendors')
-          .select('id, vendor_id, updated_at, checklist_items(id, item_name, checked, missing_date, sort_order)')
+          .select('id, vendor_id, updated_at, checklist_items(id, item_name, checked, missing_date, missing_dates, sort_order)')
           .eq('month_key', monthKey)
           .order('updated_at', { ascending: false }),
         supabase
@@ -187,6 +187,7 @@ export default function App() {
             name: item.item_name,
             checked: item.checked,
             missingDate: item.missing_date ?? '',
+            missingDates: Array.isArray(item.missing_dates) && item.missing_dates.length ? item.missing_dates : (item.missing_date ? [item.missing_date] : []),
           })),
       }));
       const ledgerRows: LedgerRow[] = (ledgerResult.data ?? []).map((row: any) => ({
@@ -323,6 +324,16 @@ function MonthlyPage({ store, setStore, monthKey, locked }: { store: Store; setS
     return [vendor.name, vendor.code, vendor.category].some((value) => value.toLocaleLowerCase('ko-KR').includes(keyword));
   });
   const statusOf = (r: MonthlyVendor): Status => { const n = r.checklist.filter(c => c.checked).length; return n === 0 ? '미진행' : n === 7 ? '완료' : '진행중'; };
+  const firstCompleteNames = ['거래명세서', '품의서', '세금계산서', '마감원장'];
+  const isFirstComplete = (r: MonthlyVendor) => firstCompleteNames.every(name => r.checklist.find(c => c.name === name)?.checked === true);
+  const counts = {
+    total: rows.length,
+    notStarted: rows.filter(r => statusOf(r) === '미진행').length,
+    inProgress: rows.filter(r => statusOf(r) === '진행중' && !isFirstComplete(r)).length,
+    firstComplete: rows.filter(r => isFirstComplete(r) && statusOf(r) !== '완료').length,
+    complete: rows.filter(r => statusOf(r) === '완료').length,
+  };
+  const averageProgress = rows.length ? Math.round(rows.reduce((sum, r) => sum + r.checklist.filter(c => c.checked).length / checklistNames.length * 100, 0) / rows.length) : 0;
   const filtered = [...rows].filter(r => (store.vendors.find(v => v.id === r.vendorId)?.name ?? '').includes(query)).sort((a,b) => {
     const va = store.vendors.find(v => v.id === a.vendorId)!; const vb = store.vendors.find(v => v.id === b.vendorId)!;
     return sort === 'name' ? va.name.localeCompare(vb.name, 'ko') : sort === 'category' ? va.category.localeCompare(vb.category, 'ko') : statusOf(a).localeCompare(statusOf(b), 'ko');
@@ -333,7 +344,7 @@ function MonthlyPage({ store, setStore, monthKey, locked }: { store: Store; setS
     const vendor = store.vendors.find(v => v.id === vendorId)!;
     const monthlyResult = await supabase.from('monthly_vendors').insert({ month_key: monthKey, vendor_id: vendorId }).select().single();
     if (monthlyResult.error) { alert(`월별 거래처 추가 실패: ${monthlyResult.error.message}`); setWorking(false); return; }
-    const checklistResult = await supabase.from('checklist_items').insert(checklistNames.map((name, index) => ({ monthly_vendor_id: monthlyResult.data.id, item_name: name, checked: false, missing_date: null, sort_order: index }))).select();
+    const checklistResult = await supabase.from('checklist_items').insert(checklistNames.map((name, index) => ({ monthly_vendor_id: monthlyResult.data.id, item_name: name, checked: false, missing_date: null, missing_dates: [], sort_order: index }))).select();
     if (checklistResult.error) {
       await supabase.from('monthly_vendors').delete().eq('id', monthlyResult.data.id);
       alert(`체크리스트 생성 실패: ${checklistResult.error.message}`); setWorking(false); return;
@@ -347,7 +358,7 @@ function MonthlyPage({ store, setStore, monthKey, locked }: { store: Store; setS
     }
     const newMonthly: MonthlyVendor = {
       id: monthlyResult.data.id, vendorId, updatedAt: monthlyResult.data.updated_at,
-      checklist: (checklistResult.data ?? []).sort((a,b) => a.sort_order-b.sort_order).map(item => ({ id:item.id, name:item.item_name, checked:item.checked, missingDate:item.missing_date ?? '' }))
+      checklist: (checklistResult.data ?? []).sort((a,b) => a.sort_order-b.sort_order).map(item => ({ id:item.id, name:item.item_name, checked:item.checked, missingDate:item.missing_date ?? '', missingDates: Array.isArray(item.missing_dates) ? item.missing_dates : (item.missing_date ? [item.missing_date] : []) }))
     };
     const nextStore: Store = {
       ...store,
@@ -364,13 +375,37 @@ function MonthlyPage({ store, setStore, monthKey, locked }: { store: Store; setS
     const nextItem = { ...item, ...patch };
     const nextRows = rows.map(r => r.id === rowId ? { ...r, updatedAt: new Date().toISOString(), checklist: r.checklist.map((c,i) => i === index ? nextItem : c) } : r);
     setStore({ ...store, monthly: { ...store.monthly, [monthKey]: nextRows } });
-    const { error } = await supabase.from('checklist_items').update({ checked: nextItem.checked, missing_date: nextItem.missingDate || null }).eq('id', item.id);
+    const normalizedDates = [...new Set((nextItem.missingDates ?? []).filter(Boolean))].sort();
+    const { error } = await supabase.from('checklist_items').update({ checked: nextItem.checked, missing_date: normalizedDates[0] || null, missing_dates: normalizedDates }).eq('id', item.id);
     if (error) {
       setStore({ ...store, monthly: { ...store.monthly, [monthKey]: rows } });
       alert(`체크리스트 저장 실패: ${error.message}`);
       return;
     }
     await supabase.from('monthly_vendors').update({ updated_at: new Date().toISOString() }).eq('id', rowId);
+  };
+  const addMissingDate = async (rowId: string, index: number) => {
+    const row = rows.find(r => r.id === rowId);
+    const item = row?.checklist[index];
+    if (!item) return;
+    const today = new Date().toISOString().slice(0, 10);
+    const dates = item.missingDates ?? (item.missingDate ? [item.missingDate] : []);
+    await updateChecklist(rowId, index, { missingDates: dates.includes(today) ? dates : [...dates, today], missingDate: dates[0] ?? today });
+  };
+  const changeMissingDate = async (rowId: string, index: number, dateIndex: number, value: string) => {
+    const row = rows.find(r => r.id === rowId);
+    const item = row?.checklist[index];
+    if (!item) return;
+    const dates = [...(item.missingDates ?? [])];
+    dates[dateIndex] = value;
+    await updateChecklist(rowId, index, { missingDates: dates.filter(Boolean), missingDate: dates.filter(Boolean)[0] ?? '' });
+  };
+  const removeMissingDate = async (rowId: string, index: number, dateIndex: number) => {
+    const row = rows.find(r => r.id === rowId);
+    const item = row?.checklist[index];
+    if (!item) return;
+    const dates = (item.missingDates ?? []).filter((_, i) => i !== dateIndex);
+    await updateChecklist(rowId, index, { missingDates: dates, missingDate: dates[0] ?? '' });
   };
   const removeMonthlyVendor = async (row: MonthlyVendor) => {
     if (locked || working) return;
@@ -415,10 +450,18 @@ function MonthlyPage({ store, setStore, monthKey, locked }: { store: Store; setS
   const detail = rows.find(r => r.id === detailId);
   const detailVendor = detail ? store.vendors.find(v => v.id === detail.vendorId) : undefined;
   return <>
+    <div className="monthly-status-grid">
+      <div className="monthly-status-card"><small>전체 거래처</small><strong>{counts.total}</strong></div>
+      <div className="monthly-status-card"><small>미진행</small><strong>{counts.notStarted}</strong></div>
+      <div className="monthly-status-card"><small>진행중</small><strong>{counts.inProgress}</strong></div>
+      <div className="monthly-status-card first"><small>1차완료</small><strong>{counts.firstComplete}</strong></div>
+      <div className="monthly-status-card complete-card"><small>완료</small><strong>{counts.complete}</strong></div>
+      <div className="monthly-status-card"><small>평균 진행률</small><strong>{averageProgress}%</strong></div>
+    </div>
     <div className="toolbar"><div className="search"><Search size={17}/><input placeholder="거래처명 검색" value={query} onChange={e => setQuery(e.target.value)}/></div><select value={sort} onChange={e => setSort(e.target.value as typeof sort)}><option value="name">거래처명순</option><option value="category">분류순</option><option value="status">마감상태순</option></select><button className="primary" onClick={() => setShowAdd(true)} disabled={locked || working}><Plus size={16}/> 거래처 추가</button></div>
-    <div className="panel table-panel"><table><thead><tr><th>거래처명</th><th>분류</th><th>진행률</th><th>누락</th><th>마감상태</th><th>최근 수정</th><th>삭제</th><th></th></tr></thead><tbody>{filtered.map(r => { const v = store.vendors.find(v => v.id === r.vendorId)!; const done = r.checklist.filter(c => c.checked).length; const missing = r.checklist.filter(c => !c.checked); const status = statusOf(r); return <tr key={r.id} onClick={() => setDetailId(r.id)} className="clickable"><td><b>{v?.name}</b><small>{v?.code}</small></td><td><span className="category-chip">{v?.category}</span></td><td><div className="progress-cell"><div><span style={{width:`${done/7*100}%`}}/></div><b>{done}/7</b></div></td><td>{missing.length ? <span className="missing">{missing.length}건</span> : <span className="complete">없음</span>}</td><td><StatusBadge status={status}/></td><td>{new Date(r.updatedAt).toLocaleDateString('ko-KR')}</td><td><button className="monthly-delete-button" disabled={locked || working} title={locked ? '마감 잠금 해제 후 삭제할 수 있습니다.' : `${v?.name ?? '거래처'} 삭제`} onClick={e => { e.stopPropagation(); void removeMonthlyVendor(r); }}><Trash2 size={15}/> 삭제</button></td><td><ChevronRight size={17}/></td></tr>})}</tbody></table>{!filtered.length && <Empty text="검색 결과가 없습니다." />}</div>
+    <div className="panel table-panel"><table><thead><tr><th>거래처명</th><th>분류</th><th>진행률</th><th>누락</th><th>마감상태</th><th>최근 수정</th><th>삭제</th><th></th></tr></thead><tbody>{filtered.map(r => { const v = store.vendors.find(v => v.id === r.vendorId)!; const done = r.checklist.filter(c => c.checked).length; const missing = r.checklist.filter(c => !c.checked); const status = statusOf(r); const firstComplete = isFirstComplete(r); return <tr key={r.id} onClick={() => setDetailId(r.id)} className="clickable"><td><b>{v?.name}</b><small>{v?.code}</small></td><td><span className="category-chip">{v?.category}</span></td><td><div className="progress-cell"><div><span style={{width:`${done/7*100}%`}}/></div><b>{done}/7</b></div></td><td>{missing.length ? <span className="missing">{missing.length}건</span> : <span className="complete">없음</span>}</td><td><div className="status-stack"><StatusBadge status={status}/>{firstComplete && status !== '완료' && <span className="first-complete-badge">1차완료</span>}</div></td><td>{new Date(r.updatedAt).toLocaleDateString('ko-KR')}</td><td><button className="monthly-delete-button" disabled={locked || working} title={locked ? '마감 잠금 해제 후 삭제할 수 있습니다.' : `${v?.name ?? '거래처'} 삭제`} onClick={e => { e.stopPropagation(); void removeMonthlyVendor(r); }}><Trash2 size={15}/> 삭제</button></td><td><ChevronRight size={17}/></td></tr>})}</tbody></table>{!filtered.length && <Empty text="검색 결과가 없습니다." />}</div>
     {showAdd && <Modal title="거래처 정보에서 추가" onClose={() => { if (!working) { setShowAdd(false); setAddQuery(''); } }}><div className="modal-search search"><Search size={17}/><input autoFocus placeholder="업체명·코드·분류 검색" value={addQuery} onChange={e => setAddQuery(e.target.value)}/></div><div className="select-list">{availableVendors.map(v => <button key={v.id} disabled={working} onClick={() => void addVendor(v.id)}><div><b>{v.name}</b><small>{v.code || '코드 없음'} · {v.category}</small></div><Plus size={17}/></button>)}{!availableVendors.length && <Empty text={addQuery ? "검색 결과가 없습니다." : "추가 가능한 거래처가 없습니다."} />}</div></Modal>}
-    {detail && detailVendor && <Modal title={detailVendor.name} onClose={() => setDetailId(null)} wide><div className="detail-summary"><div><small>현재 상태</small><StatusBadge status={statusOf(detail)}/></div><div><small>진행률</small><b>{Math.round(detail.checklist.filter(c=>c.checked).length/7*100)}%</b></div><div><small>최근 수정</small><b>{new Date(detail.updatedAt).toLocaleString('ko-KR')}</b></div></div><div className="checklist">{detail.checklist.map((c,i) => <div key={c.id ?? c.name} className={c.checked ? 'done' : ''}><label><input type="checkbox" checked={c.checked} disabled={locked} onChange={e => void updateChecklist(detail.id, i, { checked: e.target.checked, missingDate: e.target.checked ? '' : c.missingDate })}/><span>{c.checked && <Check size={15}/>}</span><b>{c.name}</b></label>{!c.checked && <div className="missing-date"><span>누락일</span><input type="date" value={c.missingDate} disabled={locked} onChange={e => void updateChecklist(detail.id, i, { missingDate: e.target.value })}/></div>}</div>)}</div>{locked && <div className="locked-note"><Lock size={16}/> 월 마감되어 수정할 수 없습니다.</div>}</Modal>}
+    {detail && detailVendor && <Modal title={detailVendor.name} onClose={() => setDetailId(null)} wide><div className="detail-summary"><div><small>현재 상태</small><div className="status-stack"><StatusBadge status={statusOf(detail)}/>{isFirstComplete(detail) && statusOf(detail) !== '완료' && <span className="first-complete-badge">1차완료</span>}</div></div><div><small>진행률</small><b>{Math.round(detail.checklist.filter(c=>c.checked).length/7*100)}%</b></div><div><small>최근 수정</small><b>{new Date(detail.updatedAt).toLocaleString('ko-KR')}</b></div></div><div className="checklist">{detail.checklist.map((c,i) => { const dates = c.missingDates ?? (c.missingDate ? [c.missingDate] : []); return <div key={c.id ?? c.name} className={c.checked ? 'done' : ''}><label><input type="checkbox" checked={c.checked} disabled={locked} onChange={e => void updateChecklist(detail.id, i, { checked: e.target.checked, missingDate: e.target.checked ? '' : c.missingDate, missingDates: e.target.checked ? [] : dates })}/><span>{c.checked && <Check size={15}/>}</span><b>{c.name}</b></label>{!c.checked && <div className="missing-dates"><div className="missing-dates-head"><span>누락일</span><button type="button" disabled={locked} onClick={() => void addMissingDate(detail.id, i)}><Plus size={14}/> 날짜 추가</button></div>{dates.map((date, dateIndex) => <div className="missing-date-row" key={`${c.id}-${dateIndex}`}><input type="date" value={date} disabled={locked} onChange={e => void changeMissingDate(detail.id, i, dateIndex, e.target.value)}/><button type="button" disabled={locked} aria-label="누락일 삭제" onClick={() => void removeMissingDate(detail.id, i, dateIndex)}><X size={14}/></button></div>)}{!dates.length && <small className="no-missing-date">등록된 누락일 없음</small>}</div>}</div>})}</div>{locked && <div className="locked-note"><Lock size={16}/> 월 마감되어 수정할 수 없습니다.</div>}</Modal>}
   </>;
 }
 
