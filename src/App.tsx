@@ -58,6 +58,7 @@ type ScheduleItem = { id: string; date: string; time: string; text: string };
 type PriceItem = { id: string; vendorId: string; name: string; unit: string };
 type PriceHistory = { id: string; itemId: string; yearMonth: string; price: number; note: string };
 type Deadline = { monthKey: string; deadlineDate: string };
+type ManualUnpaid = { id: string; monthKey: string; vendorName: string; amount: number; dueDate: string; note: string };
 
 type Store = {
   vendors: Vendor[];
@@ -67,6 +68,7 @@ type Store = {
   priceItems: PriceItem[];
   priceHistory: PriceHistory[];
   deadlines: Deadline[];
+  manualUnpaids: ManualUnpaid[];
   lockedMonths: string[];
 };
 
@@ -99,6 +101,7 @@ const seedStore: Store = {
   priceItems: [],
   priceHistory: [],
   deadlines: [],
+  manualUnpaids: [],
   lockedMonths: [],
 };
 
@@ -121,6 +124,7 @@ export default function App() {
         priceItems: parsed.priceItems ?? [],
         priceHistory: parsed.priceHistory ?? [],
         deadlines: parsed.deadlines ?? [],
+        manualUnpaids: parsed.manualUnpaids ?? [],
       };
     } catch {
       return seedStore;
@@ -183,20 +187,23 @@ export default function App() {
   useEffect(() => {
     let active = true;
     const loadDashboardData = async () => {
-      const [itemsResult, historyResult, deadlineResult] = await Promise.all([
+      const [itemsResult, historyResult, deadlineResult, unpaidResult] = await Promise.all([
         supabase.from('vendor_price_items').select('*').order('item_name', { ascending: true }),
         supabase.from('vendor_price_history').select('*').order('year_month', { ascending: false }),
         supabase.from('closing_deadlines').select('*').order('month_key', { ascending: true }),
+        supabase.from('manual_unpaid_vendors').select('*').order('created_at', { ascending: false }),
       ]);
       if (!active) return;
       if (itemsResult.error) console.error('단가 품목 불러오기 실패:', itemsResult.error.message);
       if (historyResult.error) console.error('단가 이력 불러오기 실패:', historyResult.error.message);
       if (deadlineResult.error) console.error('마감기한 불러오기 실패:', deadlineResult.error.message);
+      if (unpaidResult.error) console.error('미결제 거래처 불러오기 실패:', unpaidResult.error.message);
       setStore((current: Store) => ({
         ...current,
         priceItems: (itemsResult.data ?? []).map((r:any) => ({ id:r.id, vendorId:r.vendor_id, name:r.item_name, unit:r.unit ?? '' })),
         priceHistory: (historyResult.data ?? []).map((r:any) => ({ id:r.id, itemId:r.price_item_id, yearMonth:r.year_month, price:Number(r.price ?? 0), note:r.note ?? '' })),
         deadlines: (deadlineResult.data ?? []).map((r:any) => ({ monthKey:r.month_key, deadlineDate:r.deadline_date })),
+        manualUnpaids: (unpaidResult.data ?? []).map((r:any) => ({ id:r.id, monthKey:r.month_key, vendorName:r.vendor_name, amount:Number(r.amount ?? 0), dueDate:r.due_date ?? '', note:r.note ?? '' })),
       }));
     };
     void loadDashboardData();
@@ -314,6 +321,8 @@ function Dashboard({ store, setStore, monthKey, rows, ledger }: { store: Store; 
   const [text, setText] = useState('');
   const [previousLedger, setPreviousLedger] = useState<LedgerRow[]>([]);
   const [priceDetailId, setPriceDetailId] = useState<string | null>(null);
+  const [unpaidOpen, setUnpaidOpen] = useState(false);
+  const [unpaidForm, setUnpaidForm] = useState({ vendorName:'', amount:'', dueDate:'', note:'' });
   const firstCompleteNames = ['거래명세서', '품의서', '세금계산서', '마감원장'];
   const isFirstComplete = (r: MonthlyVendor) => firstCompleteNames.every(name => r.checklist.find(c => c.name === name)?.checked === true);
   const statusOf = (r: MonthlyVendor) => { const n=r.checklist.filter(c=>c.checked).length; return n===0?'미진행':n===7?'최종완료':isFirstComplete(r)?'1차완료':'진행중'; };
@@ -326,7 +335,7 @@ function Dashboard({ store, setStore, monthKey, rows, ledger }: { store: Store; 
     supply:list.reduce((a,r)=>a+r.supply,0), tax:list.reduce((a,r)=>a+r.tax,0), total:list.reduce((a,r)=>a+r.supply+r.tax,0),
   });
   const currentAmount=calcLedger(ledger), previousAmount=calcLedger(previousLedger);
-  const previousUnpaid=previousLedger.filter(r=>r.payment==='미결제').sort((a,b)=>(b.supply+b.tax)-(a.supply+a.tax));
+  const previousUnpaid=store.manualUnpaids.filter(r=>r.monthKey===monthKey).sort((a,b)=>b.amount-a.amount);
   const deadline=store.deadlines.find(d=>d.monthKey===monthKey)?.deadlineDate ?? `${monthKey}-${new Date(Number(monthKey.slice(0,4)),Number(monthKey.slice(5,7)),0).getDate()}`;
   const daysLeft=Math.ceil((new Date(deadline+'T23:59:59').getTime()-new Date().getTime())/86400000);
 
@@ -366,6 +375,15 @@ function Dashboard({ store, setStore, monthKey, rows, ledger }: { store: Store; 
     }).sort((a,b)=>b.latest.yearMonth.localeCompare(a.latest.yearMonth)).slice(0,6);
   },[store.priceItems,store.priceHistory]);
   const selectedChange=changes.find(c=>c.item.id===priceDetailId);
+  const addManualUnpaid = async () => {
+    if(!unpaidForm.vendorName.trim()) return;
+    const payload={month_key:monthKey,vendor_name:unpaidForm.vendorName.trim(),amount:Number(unpaidForm.amount||0),due_date:unpaidForm.dueDate||null,note:unpaidForm.note.trim()};
+    const {data,error}=await supabase.from('manual_unpaid_vendors').insert(payload).select().single();
+    if(error){alert(`미결제 거래처 저장 실패: ${error.message}`);return;}
+    setStore({...store,manualUnpaids:[...store.manualUnpaids,{id:data.id,monthKey:data.month_key,vendorName:data.vendor_name,amount:Number(data.amount??0),dueDate:data.due_date??'',note:data.note??''}]});
+    setUnpaidForm({vendorName:'',amount:'',dueDate:'',note:''}); setUnpaidOpen(false);
+  };
+  const removeManualUnpaid=async(id:string)=>{if(!confirm('이 미결제 거래처를 삭제할까요?'))return;const{error}=await supabase.from('manual_unpaid_vendors').delete().eq('id',id);if(error){alert(`삭제 실패: ${error.message}`);return;}setStore({...store,manualUnpaids:store.manualUnpaids.filter(x=>x.id!==id)});};
 
   return <div className="dashboard-v27">
     <section className="dashboard-main">
@@ -376,7 +394,7 @@ function Dashboard({ store, setStore, monthKey, rows, ledger }: { store: Store; 
       </div>
       <div className="amount-grid"><AmountPanel title="이번달 마감금액" amount={currentAmount}/><AmountPanel title="전월 마감금액" amount={previousAmount}/></div>
       <div className="dashboard-lists">
-        <div className="panel"><div className="panel-head"><div><h3>전월 미결제 거래처</h3><p>집계장의 결제여부가 ‘미결제’인 거래처</p></div></div><div className="data-list">{previousUnpaid.slice(0,7).map(r=>{const v=store.vendors.find(v=>v.id===r.vendorId);return <div key={r.id}><div><b>{v?.name??'미지정 거래처'}</b><small>{r.category}</small></div><strong>{won(r.supply+r.tax)}</strong></div>})}{!previousUnpaid.length&&<Empty text="전월 미결제 거래처가 없습니다."/>}</div></div>
+        <div className="panel"><div className="panel-head"><div><h3>전월 미결제 거래처</h3><p>실제 지급하지 않은 거래처를 직접 등록합니다.</p></div><button className="secondary" onClick={()=>setUnpaidOpen(true)}><Plus size={15}/> 등록</button></div><div className="data-list">{previousUnpaid.slice(0,7).map(r=><div key={r.id} className="manual-unpaid-row"><div><b>{r.vendorName}</b><small>{r.dueDate?`지급예정 ${r.dueDate}`:'지급예정일 없음'}{r.note?` · ${r.note}`:''}</small></div><strong>{won(r.amount)}</strong><button className="danger-icon" onClick={()=>void removeManualUnpaid(r.id)}><Trash2 size={14}/></button></div>)}{!previousUnpaid.length&&<Empty text="등록된 전월 미결제 거래처가 없습니다."/>}</div>{unpaidOpen&&<Modal title="전월 미결제 거래처 등록" onClose={()=>setUnpaidOpen(false)}><div className="form-grid"><Field label="거래처명"><input value={unpaidForm.vendorName} onChange={e=>setUnpaidForm({...unpaidForm,vendorName:e.target.value})}/></Field><Field label="미지급 금액"><input type="number" value={unpaidForm.amount} onChange={e=>setUnpaidForm({...unpaidForm,amount:e.target.value})}/></Field><Field label="지급 예정일"><input type="date" value={unpaidForm.dueDate} onChange={e=>setUnpaidForm({...unpaidForm,dueDate:e.target.value})}/></Field><Field label="비고"><input value={unpaidForm.note} onChange={e=>setUnpaidForm({...unpaidForm,note:e.target.value})}/></Field></div><button className="primary wide" onClick={()=>void addManualUnpaid()}>저장</button></Modal>}</div>
         <div className="panel"><div className="panel-head"><div><h3>최근 단가 변동 거래처</h3><p>클릭하면 단가 변동 내역을 확인합니다.</p></div></div><div className="data-list clickable-list">{changes.map(c=>{const v=store.vendors.find(v=>v.id===c.item.vendorId);return <button key={c.item.id} onClick={()=>setPriceDetailId(c.item.id)}><div><b>{v?.name} · {c.item.name}</b><small>{c.prev.yearMonth} → {c.latest.yearMonth}</small></div><strong className={c.rate>=0?'up':'down'}>{c.rate>=0?'▲':'▼'} {Math.abs(c.rate).toFixed(1)}%</strong></button>})}{!changes.length&&<Empty text="등록된 단가 변동이 없습니다."/>}</div></div>
       </div>
     </section>
@@ -544,13 +562,15 @@ function MonthlyPage({ store, setStore, monthKey, locked }: { store: Store; setS
     </div>
     <div className="toolbar"><div className="search"><Search size={17}/><input placeholder="거래처명 검색" value={query} onChange={e => setQuery(e.target.value)}/></div><select value={sort} onChange={e => setSort(e.target.value as typeof sort)}><option value="name">거래처명순</option><option value="category">분류순</option><option value="status">마감상태순</option></select><button className="primary" onClick={() => setShowAdd(true)} disabled={locked || working}><Plus size={16}/> 거래처 추가</button></div>
     <div className="panel table-panel"><table><thead><tr><th>거래처명</th><th>분류</th><th>진행률</th><th>누락</th><th>마감상태</th><th>최근 수정</th><th>삭제</th><th></th></tr></thead><tbody>{filtered.map(r => { const v = store.vendors.find(v => v.id === r.vendorId)!; const done = r.checklist.filter(c => c.checked).length; const missing = r.checklist.filter(c => !c.checked); const status = statusOf(r); const firstComplete = isFirstComplete(r); return <tr key={r.id} onClick={() => setDetailId(r.id)} className="clickable"><td><b>{v?.name}</b><small>{v?.code}</small></td><td><span className="category-chip">{v?.category}</span></td><td><div className="progress-cell"><div><span style={{width:`${done/7*100}%`}}/></div><b>{done}/7</b></div></td><td>{missing.length ? <span className="missing">{missing.length}건</span> : <span className="complete">없음</span>}</td><td><div className="status-stack"><StatusBadge status={status}/>{firstComplete && status !== '완료' && <span className="first-complete-badge">1차완료</span>}</div></td><td>{new Date(r.updatedAt).toLocaleDateString('ko-KR')}</td><td><button className="monthly-delete-button" disabled={locked || working} title={locked ? '마감 잠금 해제 후 삭제할 수 있습니다.' : `${v?.name ?? '거래처'} 삭제`} onClick={e => { e.stopPropagation(); void removeMonthlyVendor(r); }}><Trash2 size={15}/> 삭제</button></td><td><ChevronRight size={17}/></td></tr>})}</tbody></table>{!filtered.length && <Empty text="검색 결과가 없습니다." />}</div>
-    {showAdd && <Modal title="거래처 정보에서 추가" onClose={() => { if (!working) { setShowAdd(false); setAddQuery(''); } }}><div className="modal-search search"><Search size={17}/><input autoFocus placeholder="업체명·코드·분류 검색" value={addQuery} onChange={e => setAddQuery(e.target.value)}/></div><div className="select-list">{availableVendors.map(v => <button key={v.id} disabled={working} onClick={() => void addVendor(v.id)}><div><b>{v.name}</b><small>{v.code || '코드 없음'} · {v.category}</small></div><Plus size={17}/></button>)}{!availableVendors.length && <Empty text={addQuery ? "검색 결과가 없습니다." : "추가 가능한 거래처가 없습니다."} />}</div></Modal>}
+    {showAdd && <Modal title="거래처 정보에서 추가" onClose={() => { if (!working) { setShowAdd(false); setAddQuery(''); } }}><div className="modal-search search"><Search size={17}/><input autoFocus placeholder="업체명·분류 검색" value={addQuery} onChange={e => setAddQuery(e.target.value)}/></div><div className="select-list">{availableVendors.map(v => <button key={v.id} disabled={working} onClick={() => void addVendor(v.id)}><div><b>{v.name}</b><small>{v.category}</small></div><Plus size={17}/></button>)}{!availableVendors.length && <Empty text={addQuery ? "검색 결과가 없습니다." : "추가 가능한 거래처가 없습니다."} />}</div></Modal>}
     {detail && detailVendor && <Modal title={detailVendor.name} onClose={() => setDetailId(null)} wide><div className="detail-summary"><div><small>현재 상태</small><div className="status-stack"><StatusBadge status={statusOf(detail)}/>{isFirstComplete(detail) && statusOf(detail) !== '완료' && <span className="first-complete-badge">1차완료</span>}</div></div><div><small>진행률</small><b>{Math.round(detail.checklist.filter(c=>c.checked).length/7*100)}%</b></div><div><small>최근 수정</small><b>{new Date(detail.updatedAt).toLocaleString('ko-KR')}</b></div></div><div className="checklist">{detail.checklist.map((c,i) => { const dates = c.missingDates ?? (c.missingDate ? [c.missingDate] : []); return <div key={c.id ?? c.name} className={c.checked ? 'done' : ''}><label><input type="checkbox" checked={c.checked} disabled={locked} onChange={e => void updateChecklist(detail.id, i, { checked: e.target.checked, missingDate: e.target.checked ? '' : c.missingDate, missingDates: e.target.checked ? [] : dates })}/><span>{c.checked && <Check size={15}/>}</span><b>{c.name}</b></label>{!c.checked && <div className="missing-dates"><div className="missing-dates-head"><span>누락일</span><button type="button" disabled={locked} onClick={() => void addMissingDate(detail.id, i)}><Plus size={14}/> 날짜 추가</button></div>{dates.map((date, dateIndex) => <div className="missing-date-row" key={`${c.id}-${dateIndex}`}><input type="date" value={date} disabled={locked} onChange={e => void changeMissingDate(detail.id, i, dateIndex, e.target.value)}/><button type="button" disabled={locked} aria-label="누락일 삭제" onClick={() => void removeMissingDate(detail.id, i, dateIndex)}><X size={14}/></button></div>)}{!dates.length && <small className="no-missing-date">등록된 누락일 없음</small>}</div>}</div>})}</div>{locked && <div className="locked-note"><Lock size={16}/> 월 마감되어 수정할 수 없습니다.</div>}</Modal>}
   </>;
 }
 
 function LedgerPage({ store, setStore, monthKey, locked }: { store: Store; setStore: (s: Store) => void; monthKey: string; locked: boolean }) {
   const rows = store.ledger[monthKey] ?? [];
+  const categoryOrder: Record<Category, number> = {'상품 및 외주가공':0,'부자재':1};
+  const sortedRows = [...rows].sort((a,b)=>{const c=categoryOrder[a.category]-categoryOrder[b.category];if(c!==0)return c;const an=store.vendors.find(v=>v.id===a.vendorId)?.name??'';const bn=store.vendors.find(v=>v.id===b.vendorId)?.name??'';return an.localeCompare(bn,'ko');});
   const update = async (id: string, patch: Partial<LedgerRow>) => {
     if (locked) return;
     const current = rows.find(r => r.id === id);
@@ -580,7 +600,7 @@ function LedgerPage({ store, setStore, monthKey, locked }: { store: Store; setSt
   const b = unpaid + paid;
   const exportExcel = () => {
     const headers = ['No','구분','업체명','업체코드','대표자','업태','업종','등록번호','공급가액','세액','합계금액','결제여부','비고'];
-    const body = rows.map((r, i) => { const v = store.vendors.find(v => v.id === r.vendorId); return [i + 1, r.category, v?.name ?? '', v?.code ?? '', v?.ceo ?? '', v?.businessType ?? '', v?.businessItem ?? '', v?.registrationNo ?? '', r.supply, r.tax, r.supply + r.tax, r.payment, r.note]; });
+    const body = sortedRows.map((r, i) => { const v = store.vendors.find(v => v.id === r.vendorId); return [i + 1, r.category, v?.name ?? '', v?.code ?? '', v?.ceo ?? '', v?.businessType ?? '', v?.businessItem ?? '', v?.registrationNo ?? '', r.supply, r.tax, r.supply + r.tax, r.payment, r.note]; });
     body.push([]); body.push(['', '상품 및 외주가공 합계 (a)', '', '', '', '', '', '', '', '', a]); body.push(['', '부자재 미결제분', '', '', '', '', '', '', '', '', unpaid]); body.push(['', '부자재 결제완료', '', '', '', '', '', '', '', '', paid]); body.push(['', '부자재 소계 (b)', '', '', '', '', '', '', '', '', b]); body.push(['', '총 매입 합계 (a+b)', '', '', '', '', '', '', '', '', a + b]);
     const escape = (value: string | number) => `"${String(value).replace(/"/g, '""')}"`;
     const csv = '\ufeff' + [headers, ...body].map(row => row.map(escape).join(',')).join('\n');
@@ -600,7 +620,7 @@ function LedgerPage({ store, setStore, monthKey, locked }: { store: Store; setSt
   return <>
     <div className="toolbar"><div className="toolbar-note">거래처를 선택하면 대표자·업태·업종·등록번호가 자동 표시됩니다.</div><button className="secondary" onClick={exportExcel}><Download size={16}/> Excel 저장</button><button className="secondary" onClick={() => window.print()}>인쇄</button><button className={locked ? 'secondary' : 'danger-button'} onClick={() => void toggleLock()}>{locked ? <><Unlock size={16}/> 잠금 해제</> : <><Lock size={16}/> 월 마감</>}</button><button className="primary" onClick={() => void addRow()} disabled={locked}><Plus size={16}/> 내역 추가</button></div>
     <div className="summary-strip"><Summary label="상품 및 외주가공 합계 (a)" value={a}/><Summary label="부자재 미결제분" value={unpaid}/><Summary label="부자재 결제완료" value={paid}/><Summary label="부자재 소계 (b)" value={b}/><Summary label="총 매입 합계 (a+b)" value={a+b} strong/></div>
-    <div className="panel table-panel ledger-table"><table><thead><tr><th>No</th><th>구분</th><th>업체명/코드 검색</th><th>대표자</th><th>업태</th><th>업종</th><th>등록번호</th><th>공급가액</th><th>세액</th><th>합계금액</th><th>결제여부</th><th>비고</th><th>삭제</th></tr></thead><tbody>{rows.map((r,i) => { const v = store.vendors.find(v => v.id === r.vendorId); const total = r.supply + r.tax; return <tr key={r.id}><td>{i+1}</td><td><select value={r.category} disabled={locked} onChange={e => void update(r.id,{category:e.target.value as Category})}><option>상품 및 외주가공</option><option>부자재</option></select></td><td><select value={r.vendorId} disabled={locked} onChange={e => { const nv=store.vendors.find(v=>v.id===e.target.value); if(nv) void update(r.id,{vendorId:nv.id,category:nv.category}); }}><option value="">선택</option>{store.vendors.map(v => <option key={v.id} value={v.id}>{v.name} / {v.code}</option>)}</select></td><td>{v?.ceo}</td><td>{v?.businessType}</td><td>{v?.businessItem}</td><td>{v?.registrationNo}</td><td><input className="money" type="number" value={r.supply || ''} disabled={locked} onChange={e => { const supply=Number(e.target.value); void update(r.id,{supply,tax:Math.round(supply*0.1)}); }}/></td><td><input className="money" type="number" value={r.tax || ''} disabled={locked} onChange={e => void update(r.id,{tax:Number(e.target.value)})}/></td><td><b>{total.toLocaleString()}</b></td><td><select value={r.payment} disabled={locked} onChange={e => void update(r.id,{payment:e.target.value as Payment})}><option value="미결제">미결제</option><option value="결제">결제</option></select></td><td><input value={r.note} disabled={locked} onChange={e=>void update(r.id,{note:e.target.value})}/></td><td><button className="danger-icon" disabled={locked} onClick={() => void remove(r.id)}><Trash2 size={16}/></button></td></tr>})}</tbody></table>{!rows.length && <Empty text="등록된 집계장 내역이 없습니다." />}</div>
+    <div className="panel table-panel ledger-table"><table><thead><tr><th>No</th><th>구분</th><th>업체명/코드 검색</th><th>대표자</th><th>업태</th><th>업종</th><th>등록번호</th><th>공급가액</th><th>세액</th><th>합계금액</th><th>결제여부</th><th>비고</th><th>삭제</th></tr></thead><tbody>{sortedRows.map((r,i) => { const v = store.vendors.find(v => v.id === r.vendorId); const total = r.supply + r.tax; return <tr key={r.id}><td>{i+1}</td><td><select value={r.category} disabled={locked} onChange={e => void update(r.id,{category:e.target.value as Category})}><option>상품 및 외주가공</option><option>부자재</option></select></td><td><select value={r.vendorId} disabled={locked} onChange={e => { const nv=store.vendors.find(v=>v.id===e.target.value); if(nv) void update(r.id,{vendorId:nv.id,category:nv.category}); }}><option value="">선택</option>{store.vendors.map(v => <option key={v.id} value={v.id}>{v.name}</option>)}</select></td><td>{v?.ceo}</td><td>{v?.businessType}</td><td>{v?.businessItem}</td><td>{v?.registrationNo}</td><td><input className="money" type="number" value={r.supply || ''} disabled={locked} onChange={e => { const supply=Number(e.target.value); void update(r.id,{supply,tax:Math.round(supply*0.1)}); }}/></td><td><input className="money" type="number" value={r.tax || ''} disabled={locked} onChange={e => void update(r.id,{tax:Number(e.target.value)})}/></td><td><b>{total.toLocaleString()}</b></td><td><select value={r.payment} disabled={locked} onChange={e => void update(r.id,{payment:e.target.value as Payment})}><option value="미결제">미결제</option><option value="결제">결제</option></select></td><td><input value={r.note} disabled={locked} onChange={e=>void update(r.id,{note:e.target.value})}/></td><td><button className="danger-icon" disabled={locked} onClick={() => void remove(r.id)}><Trash2 size={16}/></button></td></tr>})}</tbody></table>{!rows.length && <Empty text="등록된 집계장 내역이 없습니다." />}</div>
   </>;
 }
 
@@ -613,9 +633,6 @@ function VendorsPage({ store, setStore }: { store: Store; setStore: (s: Store) =
 
   const save = async () => {
     if (!form.name.trim()) { setMessage('업체명을 입력해 주세요.'); return; }
-    const duplicate = store.vendors.some(v => v.code.trim() && v.code.trim() === form.code.trim() && v.id !== form.id);
-    if (duplicate) { setMessage('이미 사용 중인 업체코드입니다.'); return; }
-
     setSaving(true); setMessage('');
     const payload = {
       category: form.category,
@@ -673,7 +690,7 @@ function VendorsPage({ store, setStore }: { store: Store; setStore: (s: Store) =
     if(error){ alert(`삭제 실패: ${error.message}`); return; }
     setStore({...store,vendors:store.vendors.filter(v=>v.id!==id)});
   };
-  return <><div className="toolbar"><div className="toolbar-note">Supabase에 저장되는 거래처 기본정보입니다. 다른 PC에서도 동일하게 표시됩니다.</div><button className="primary" onClick={()=>{setMessage('');setForm(empty);setOpen(true)}}><Plus size={16}/> 거래처 등록</button></div><div className="panel table-panel"><table><thead><tr><th>구분</th><th>업체명</th><th>업체코드</th><th>대표자</th><th>업태</th><th>업종</th><th>등록번호</th><th></th></tr></thead><tbody>{store.vendors.map(v=><tr key={v.id}><td><span className="category-chip">{v.category}</span></td><td><b>{v.name}</b></td><td>{v.code}</td><td>{v.ceo}</td><td>{v.businessType}</td><td>{v.businessItem}</td><td>{v.registrationNo}</td><td><div className="row-actions"><button onClick={()=>edit(v)}>수정</button><button className="danger" onClick={()=>void remove(v.id)}>삭제</button></div></td></tr>)}</tbody></table>{!store.vendors.length && <Empty text="등록된 거래처가 없습니다. 거래처 등록 버튼을 눌러 추가하세요." />}</div>{open&&<Modal title={form.id?'거래처 정보 수정':'거래처 등록'} onClose={()=>!saving&&setOpen(false)}><div className="form-grid"><Field label="구분"><select value={form.category} onChange={e=>setForm({...form,category:e.target.value as Category})}><option>부자재</option><option>상품 및 외주가공</option></select></Field><Field label="업체명"><input value={form.name} onChange={e=>setForm({...form,name:e.target.value})}/></Field><Field label="업체코드"><input value={form.code} onChange={e=>setForm({...form,code:e.target.value})}/></Field><Field label="대표자"><input value={form.ceo} onChange={e=>setForm({...form,ceo:e.target.value})}/></Field><Field label="업태"><input value={form.businessType} onChange={e=>setForm({...form,businessType:e.target.value})}/></Field><Field label="업종"><input value={form.businessItem} onChange={e=>setForm({...form,businessItem:e.target.value})}/></Field><Field label="등록번호"><input value={form.registrationNo} onChange={e=>setForm({...form,registrationNo:e.target.value})}/></Field></div>{message&&<p style={{color:'#c2410c',margin:'12px 0 0'}}>{message}</p>}<button className="primary wide" disabled={saving} onClick={()=>void save()}>{saving?'저장 중...':'저장'}</button></Modal>}</>;
+  return <><div className="toolbar"><div className="toolbar-note">Supabase에 저장되는 거래처 기본정보입니다. 다른 PC에서도 동일하게 표시됩니다.</div><button className="primary" onClick={()=>{setMessage('');setForm(empty);setOpen(true)}}><Plus size={16}/> 거래처 등록</button></div><div className="panel table-panel"><table><thead><tr><th>구분</th><th>업체명</th><th>대표자</th><th>업태</th><th>업종</th><th>등록번호</th><th></th></tr></thead><tbody>{store.vendors.map(v=><tr key={v.id}><td><span className={`category-chip ${v.category==='부자재'?'material':'goods'}`}>{v.category}</span></td><td><b>{v.name}</b></td><td>{v.ceo}</td><td>{v.businessType}</td><td>{v.businessItem}</td><td>{v.registrationNo}</td><td><div className="row-actions"><button onClick={()=>edit(v)}>수정</button><button className="danger" onClick={()=>void remove(v.id)}>삭제</button></div></td></tr>)}</tbody></table>{!store.vendors.length && <Empty text="등록된 거래처가 없습니다. 거래처 등록 버튼을 눌러 추가하세요." />}</div>{open&&<Modal title={form.id?'거래처 정보 수정':'거래처 등록'} onClose={()=>!saving&&setOpen(false)}><div className="form-grid"><Field label="구분"><select value={form.category} onChange={e=>setForm({...form,category:e.target.value as Category})}><option>부자재</option><option>상품 및 외주가공</option></select></Field><Field label="업체명"><input value={form.name} onChange={e=>setForm({...form,name:e.target.value})}/></Field><Field label="대표자"><input value={form.ceo} onChange={e=>setForm({...form,ceo:e.target.value})}/></Field><Field label="업태"><input value={form.businessType} onChange={e=>setForm({...form,businessType:e.target.value})}/></Field><Field label="업종"><input value={form.businessItem} onChange={e=>setForm({...form,businessItem:e.target.value})}/></Field><Field label="등록번호"><input value={form.registrationNo} onChange={e=>setForm({...form,registrationNo:e.target.value})}/></Field></div>{message&&<p style={{color:'#c2410c',margin:'12px 0 0'}}>{message}</p>}<button className="primary wide" disabled={saving} onClick={()=>void save()}>{saving?'저장 중...':'저장'}</button></Modal>}</>;
 }
 
 function PricesPage({ store, setStore }: { store: Store; setStore: (s: Store) => void }) {
@@ -693,7 +710,7 @@ function ContactsPage({ store, setStore }: { store: Store; setStore: (s: Store) 
     const { error } = await supabase.from('vendors').update({ manager: v.manager ?? '', phone: v.phone ?? '' }).eq('id', v.id);
     if(error) alert(`연락처 저장 실패: ${error.message}`);
   };
-  return <><div className="toolbar"><div className="toolbar-note">담당자와 연락처는 입력 후 다른 칸을 클릭하면 Supabase에 저장됩니다.</div></div><div className="panel table-panel"><table><thead><tr><th>거래처명</th><th>담당자</th><th>연락처</th><th>분류</th></tr></thead><tbody>{store.vendors.map(v=><tr key={v.id}><td><b>{v.name}</b><small>{v.code}</small></td><td><input value={v.manager??''} onChange={e=>updateLocal(v.id,{manager:e.target.value})} onBlur={()=>void saveContact(v)}/></td><td><input value={v.phone??''} onChange={e=>updateLocal(v.id,{phone:e.target.value})} onBlur={()=>void saveContact(v)}/></td><td><span className="category-chip">{v.category}</span></td></tr>)}</tbody></table></div></>;
+  return <><div className="toolbar"><div className="toolbar-note">담당자와 연락처는 입력 후 다른 칸을 클릭하면 Supabase에 저장됩니다.</div></div><div className="panel table-panel"><table><thead><tr><th>거래처명</th><th>담당자</th><th>연락처</th><th>분류</th></tr></thead><tbody>{store.vendors.map(v=><tr key={v.id}><td><b>{v.name}</b><small>{v.code}</small></td><td><input value={v.manager??''} onChange={e=>updateLocal(v.id,{manager:e.target.value})} onBlur={()=>void saveContact(v)}/></td><td><input value={v.phone??''} onChange={e=>updateLocal(v.id,{phone:e.target.value})} onBlur={()=>void saveContact(v)}/></td><td><span className={`category-chip ${v.category==='부자재'?'material':'goods'}`}>{v.category}</span></td></tr>)}</tbody></table></div></>;
 }
 
 function SettingsPage({ store, setStore, monthKey }: { store: Store; setStore: (s: Store) => void; monthKey: string }) {
