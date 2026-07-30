@@ -4,6 +4,11 @@ import {
   BarChart3,
   Building2,
   CalendarDays,
+  ChevronLeft,
+  ChevronDown,
+  Clock3,
+  TrendingUp,
+  Tag,
   Check,
   ChevronRight,
   ClipboardCheck,
@@ -20,7 +25,7 @@ import {
   X,
 } from 'lucide-react';
 
-type Page = 'dashboard' | 'monthly' | 'ledger' | 'vendors' | 'contacts' | 'settings';
+type Page = 'dashboard' | 'monthly' | 'ledger' | 'prices' | 'vendors' | 'contacts' | 'settings';
 type Category = '상품 및 외주가공' | '부자재';
 type Payment = '미결제' | '결제';
 type Status = '미진행' | '진행중' | '완료';
@@ -49,13 +54,19 @@ type LedgerRow = {
   payment: Payment;
   note: string;
 };
-type ScheduleItem = { id: string; date: string; text: string };
+type ScheduleItem = { id: string; date: string; time: string; text: string };
+type PriceItem = { id: string; vendorId: string; name: string; unit: string };
+type PriceHistory = { id: string; itemId: string; yearMonth: string; price: number; note: string };
+type Deadline = { monthKey: string; deadlineDate: string };
 
 type Store = {
   vendors: Vendor[];
   monthly: Record<string, MonthlyVendor[]>;
   ledger: Record<string, LedgerRow[]>;
   schedules: ScheduleItem[];
+  priceItems: PriceItem[];
+  priceHistory: PriceHistory[];
+  deadlines: Deadline[];
   lockedMonths: string[];
 };
 
@@ -84,7 +95,10 @@ const seedStore: Store = {
       { id: 'l2', category: '상품 및 외주가공', vendorId: 'v2', supply: 2500000, tax: 250000, payment: '결제', note: '' },
     ],
   },
-  schedules: [{ id: 's1', date: new Date().toISOString().slice(0, 10), text: '마감원장 누락 거래처 확인' }],
+  schedules: [{ id: 's1', date: new Date().toISOString().slice(0, 10), time: '09:00', text: '마감원장 누락 거래처 확인' }],
+  priceItems: [],
+  priceHistory: [],
+  deadlines: [],
   lockedMonths: [],
 };
 
@@ -98,7 +112,16 @@ export default function App() {
   const [store, setStore] = useState<Store>(() => {
     try {
       const saved = localStorage.getItem('purchase-closing-v2');
-      return saved ? JSON.parse(saved) : seedStore;
+      if (!saved) return seedStore;
+      const parsed = JSON.parse(saved);
+      return {
+        ...seedStore,
+        ...parsed,
+        schedules: (parsed.schedules ?? []).map((item: any) => ({ ...item, time: item.time ?? '' })),
+        priceItems: parsed.priceItems ?? [],
+        priceHistory: parsed.priceHistory ?? [],
+        deadlines: parsed.deadlines ?? [],
+      };
     } catch {
       return seedStore;
     }
@@ -141,7 +164,7 @@ export default function App() {
     let active = true;
     const loadSharedData = async () => {
       const [scheduleResult, lockResult] = await Promise.all([
-        supabase.from('schedules').select('*').order('schedule_date', { ascending: true }).order('created_at', { ascending: true }),
+        supabase.from('schedules').select('*').order('schedule_date', { ascending: true }).order('schedule_time', { ascending: true }).order('created_at', { ascending: true }),
         supabase.from('locked_months').select('month_key').order('month_key', { ascending: true }),
       ]);
       if (!active) return;
@@ -149,11 +172,34 @@ export default function App() {
       if (lockResult.error) console.error('잠금 정보 불러오기 실패:', lockResult.error.message);
       setStore((current: Store) => ({
         ...current,
-        schedules: (scheduleResult.data ?? []).map((row: any) => ({ id: row.id, date: row.schedule_date, text: row.content })),
+        schedules: (scheduleResult.data ?? []).map((row: any) => ({ id: row.id, date: row.schedule_date, time: row.schedule_time?.slice(0,5) ?? '', text: row.content })),
         lockedMonths: (lockResult.data ?? []).map((row: any) => row.month_key),
       }));
     };
     void loadSharedData();
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    const loadDashboardData = async () => {
+      const [itemsResult, historyResult, deadlineResult] = await Promise.all([
+        supabase.from('vendor_price_items').select('*').order('item_name', { ascending: true }),
+        supabase.from('vendor_price_history').select('*').order('year_month', { ascending: false }),
+        supabase.from('closing_deadlines').select('*').order('month_key', { ascending: true }),
+      ]);
+      if (!active) return;
+      if (itemsResult.error) console.error('단가 품목 불러오기 실패:', itemsResult.error.message);
+      if (historyResult.error) console.error('단가 이력 불러오기 실패:', historyResult.error.message);
+      if (deadlineResult.error) console.error('마감기한 불러오기 실패:', deadlineResult.error.message);
+      setStore((current: Store) => ({
+        ...current,
+        priceItems: (itemsResult.data ?? []).map((r:any) => ({ id:r.id, vendorId:r.vendor_id, name:r.item_name, unit:r.unit ?? '' })),
+        priceHistory: (historyResult.data ?? []).map((r:any) => ({ id:r.id, itemId:r.price_item_id, yearMonth:r.year_month, price:Number(r.price ?? 0), note:r.note ?? '' })),
+        deadlines: (deadlineResult.data ?? []).map((r:any) => ({ monthKey:r.month_key, deadlineDate:r.deadline_date })),
+      }));
+    };
+    void loadDashboardData();
     return () => { active = false; };
   }, []);
 
@@ -217,6 +263,7 @@ export default function App() {
     ['dashboard', '대시보드', LayoutDashboard],
     ['monthly', '월별 마감 현황', ClipboardCheck],
     ['ledger', '매입세금계산서 집계장', FileSpreadsheet],
+    ['prices', '거래처 단가', Tag],
     ['vendors', '거래처 정보', Building2],
     ['contacts', '거래처 연락처', Contact],
     ['settings', '설정', Settings],
@@ -249,6 +296,7 @@ export default function App() {
         {page === 'dashboard' && <Dashboard store={store} setStore={setStore} monthKey={monthKey} rows={monthRows} ledger={ledgerRows} />}
         {page === 'monthly' && <MonthlyPage store={store} setStore={setStore} monthKey={monthKey} locked={isLocked} />}
         {page === 'ledger' && <LedgerPage store={store} setStore={setStore} monthKey={monthKey} locked={isLocked} />}
+        {page === 'prices' && <PricesPage store={store} setStore={setStore} />}
         {page === 'vendors' && <VendorsPage store={store} setStore={setStore} />}
         {page === 'contacts' && <ContactsPage store={store} setStore={setStore} />}
         {page === 'settings' && <SettingsPage store={store} setStore={setStore} monthKey={monthKey} />}
@@ -260,54 +308,90 @@ export default function App() {
 function Dashboard({ store, setStore, monthKey, rows, ledger }: { store: Store; setStore: (s: Store) => void; monthKey: string; rows: MonthlyVendor[]; ledger: LedgerRow[] }) {
   const today = new Date().toISOString().slice(0, 10);
   const [selectedDate, setSelectedDate] = useState(today);
+  const [calendarMonth, setCalendarMonth] = useState(monthKey);
   const [editing, setEditing] = useState(false);
+  const [scheduleTime, setScheduleTime] = useState('09:00');
   const [text, setText] = useState('');
-  const progress = rows.length ? Math.round(rows.reduce((a, r) => a + r.checklist.filter(c => c.checked).length, 0) / (rows.length * 7) * 100) : 0;
-  const completed = rows.filter(r => r.checklist.every(c => c.checked)).length;
-  const schedules = store.schedules.filter(s => s.date === selectedDate);
-  const total = ledger.reduce((a, r) => a + r.supply + r.tax, 0);
-  const unpaid = ledger.filter(r => r.payment === '미결제').reduce((a, r) => a + r.supply + r.tax, 0);
+  const [previousLedger, setPreviousLedger] = useState<LedgerRow[]>([]);
+  const [priceDetailId, setPriceDetailId] = useState<string | null>(null);
+  const firstCompleteNames = ['거래명세서', '품의서', '세금계산서', '마감원장'];
+  const isFirstComplete = (r: MonthlyVendor) => firstCompleteNames.every(name => r.checklist.find(c => c.name === name)?.checked === true);
+  const statusOf = (r: MonthlyVendor) => { const n=r.checklist.filter(c=>c.checked).length; return n===0?'미진행':n===7?'최종완료':isFirstComplete(r)?'1차완료':'진행중'; };
+  const progress = rows.length ? Math.round(rows.reduce((a, r) => a + r.checklist.filter(c => c.checked).length, 0) / (rows.length * checklistNames.length) * 100) : 0;
+  const counts = { notStarted:rows.filter(r=>statusOf(r)==='미진행').length, progress:rows.filter(r=>statusOf(r)==='진행중').length, first:rows.filter(r=>statusOf(r)==='1차완료').length, final:rows.filter(r=>statusOf(r)==='최종완료').length };
+  const schedules = store.schedules.filter(s => s.date === selectedDate).sort((a,b)=>(a.time??'').localeCompare(b.time??''));
+  const calcLedger = (list: LedgerRow[]) => ({
+    goods:list.filter(r=>r.category==='상품 및 외주가공').reduce((a,r)=>a+r.supply+r.tax,0),
+    material:list.filter(r=>r.category==='부자재').reduce((a,r)=>a+r.supply+r.tax,0),
+    supply:list.reduce((a,r)=>a+r.supply,0), tax:list.reduce((a,r)=>a+r.tax,0), total:list.reduce((a,r)=>a+r.supply+r.tax,0),
+  });
+  const currentAmount=calcLedger(ledger), previousAmount=calcLedger(previousLedger);
+  const previousUnpaid=previousLedger.filter(r=>r.payment==='미결제').sort((a,b)=>(b.supply+b.tax)-(a.supply+a.tax));
+  const deadline=store.deadlines.find(d=>d.monthKey===monthKey)?.deadlineDate ?? `${monthKey}-${new Date(Number(monthKey.slice(0,4)),Number(monthKey.slice(5,7)),0).getDate()}`;
+  const daysLeft=Math.ceil((new Date(deadline+'T23:59:59').getTime()-new Date().getTime())/86400000);
+
+  useEffect(()=>{
+    const d=new Date(Number(monthKey.slice(0,4)), Number(monthKey.slice(5,7))-2, 1);
+    const prevKey=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+    let active=true;
+    void supabase.from('ledger_rows').select('*').eq('month_key',prevKey).order('created_at',{ascending:true}).then(({data,error})=>{
+      if(!active) return;
+      if(error){console.error('전월 집계장 불러오기 실패:',error.message);return;}
+      setPreviousLedger((data??[]).map((r:any)=>({id:r.id,category:r.category as Category,vendorId:r.vendor_id??'',supply:Number(r.supply??0),tax:Number(r.tax??0),payment:r.payment as Payment,note:r.note??''})));
+    });
+    return()=>{active=false};
+  },[monthKey]);
 
   const addSchedule = async () => {
     if (!text.trim()) return;
-    const { data, error } = await supabase.from('schedules').insert({ schedule_date: selectedDate, content: text.trim() }).select().single();
+    const { data, error } = await supabase.from('schedules').insert({ schedule_date: selectedDate, schedule_time: scheduleTime || null, content: text.trim() }).select().single();
     if (error) { alert(`일정 저장 실패: ${error.message}`); return; }
-    setStore({ ...store, schedules: [...store.schedules, { id: data.id, date: data.schedule_date, text: data.content }] });
+    setStore({ ...store, schedules: [...store.schedules, { id: data.id, date: data.schedule_date, time: data.schedule_time?.slice(0,5) ?? '', text: data.content }] });
     setText(''); setEditing(false);
   };
-  const removeSchedule = async (id: string) => {
-    const { error } = await supabase.from('schedules').delete().eq('id', id);
-    if (error) { alert(`일정 삭제 실패: ${error.message}`); return; }
-    setStore({ ...store, schedules: store.schedules.filter(x => x.id !== id) });
+  const removeSchedule = async (id: string) => { const {error}=await supabase.from('schedules').delete().eq('id',id); if(error){alert(`일정 삭제 실패: ${error.message}`);return;} setStore({...store,schedules:store.schedules.filter(x=>x.id!==id)}); };
+  const saveDeadline = async (value:string) => {
+    const {error}=await supabase.from('closing_deadlines').upsert({month_key:monthKey,deadline_date:value},{onConflict:'month_key'});
+    if(error){alert(`마감기한 저장 실패: ${error.message}`);return;}
+    setStore({...store,deadlines:[...store.deadlines.filter(d=>d.monthKey!==monthKey),{monthKey,deadlineDate:value}]});
   };
-  return <div className="dashboard-grid">
-    <section className="content-column">
-      <div className="hero-card">
-        <div><span className="eyebrow">MONTHLY CLOSING</span><h2>{monthKey.replace('-', '년 ')}월 마감 현황</h2><p>등록된 거래처의 체크리스트 진행률을 한눈에 확인하세요.</p></div>
-        <div className="progress-ring" style={{ '--p': `${progress * 3.6}deg` } as React.CSSProperties}><div><strong>{progress}%</strong><span>전체 진행률</span></div></div>
+  const [cy,cm]=calendarMonth.split('-').map(Number); const first=new Date(cy,cm-1,1); const last=new Date(cy,cm,0); const cells=[...Array(first.getDay()).fill(null),...Array.from({length:last.getDate()},(_,i)=>i+1)];
+  const moveCal=(delta:number)=>{const d=new Date(cy,cm-1+delta,1);setCalendarMonth(`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`)};
+  const changes=useMemo(()=>{
+    return store.priceItems.flatMap(item=>{
+      const hs=store.priceHistory.filter(h=>h.itemId===item.id).sort((a,b)=>b.yearMonth.localeCompare(a.yearMonth));
+      if(hs.length<2) return [];
+      const latest=hs[0],prev=hs[1]; if(latest.price===prev.price)return[];
+      return [{item,latest,prev,rate:prev.price?((latest.price-prev.price)/prev.price*100):0}];
+    }).sort((a,b)=>b.latest.yearMonth.localeCompare(a.latest.yearMonth)).slice(0,6);
+  },[store.priceItems,store.priceHistory]);
+  const selectedChange=changes.find(c=>c.item.id===priceDetailId);
+
+  return <div className="dashboard-v27">
+    <section className="dashboard-main">
+      <div className="closing-overview panel">
+        <div className="overview-title"><span>{monthKey.slice(0,4)}년 {Number(monthKey.slice(5,7))}월</span><h2>마감현황</h2></div>
+        <div className="progress-ring compact" style={{'--p':`${progress*3.6}deg`} as React.CSSProperties}><div><strong>{progress}%</strong><span>{rows.reduce((a,r)=>a+r.checklist.filter(c=>c.checked).length,0)} / {rows.length*7}건</span></div></div>
+        <DashboardCount label="미진행" value={counts.notStarted} kind="gray"/><DashboardCount label="진행 중" value={counts.progress} kind="purple"/><DashboardCount label="1차 완료" value={counts.first} kind="green"/><DashboardCount label="최종 완료" value={counts.final} kind="violet"/>
       </div>
-      <div className="stats-grid">
-        <Stat label="등록 거래처" value={`${rows.length}개`} sub="현재 월 기준" />
-        <Stat label="마감 완료" value={`${completed}개`} sub={`진행 중 ${rows.length - completed}개`} />
-        <Stat label="당월 매입 합계" value={won(total)} sub="공급가액+세액" />
-        <Stat label="부자재 미결제분" value={won(unpaid)} sub="결제여부 기준" />
-      </div>
-      <div className="panel"><div className="panel-head"><div><h3>최근 마감 현황</h3><p>거래처별 진행 상태</p></div></div>
-        <div className="simple-list">{rows.slice(0, 6).map(r => { const v = store.vendors.find(v => v.id === r.vendorId); const pct = Math.round(r.checklist.filter(c => c.checked).length / 7 * 100); return <div key={r.id}><div><b>{v?.name}</b><small>{v?.category}</small></div><div className="mini-progress"><span style={{ width: `${pct}%` }} /></div><em>{pct}%</em></div> })}{!rows.length && <Empty text="등록된 거래처가 없습니다." />}</div>
+      <div className="amount-grid"><AmountPanel title="이번달 마감금액" amount={currentAmount}/><AmountPanel title="전월 마감금액" amount={previousAmount}/></div>
+      <div className="dashboard-lists">
+        <div className="panel"><div className="panel-head"><div><h3>전월 미결제 거래처</h3><p>집계장의 결제여부가 ‘미결제’인 거래처</p></div></div><div className="data-list">{previousUnpaid.slice(0,7).map(r=>{const v=store.vendors.find(v=>v.id===r.vendorId);return <div key={r.id}><div><b>{v?.name??'미지정 거래처'}</b><small>{r.category}</small></div><strong>{won(r.supply+r.tax)}</strong></div>})}{!previousUnpaid.length&&<Empty text="전월 미결제 거래처가 없습니다."/>}</div></div>
+        <div className="panel"><div className="panel-head"><div><h3>최근 단가 변동 거래처</h3><p>클릭하면 단가 변동 내역을 확인합니다.</p></div></div><div className="data-list clickable-list">{changes.map(c=>{const v=store.vendors.find(v=>v.id===c.item.vendorId);return <button key={c.item.id} onClick={()=>setPriceDetailId(c.item.id)}><div><b>{v?.name} · {c.item.name}</b><small>{c.prev.yearMonth} → {c.latest.yearMonth}</small></div><strong className={c.rate>=0?'up':'down'}>{c.rate>=0?'▲':'▼'} {Math.abs(c.rate).toFixed(1)}%</strong></button>})}{!changes.length&&<Empty text="등록된 단가 변동이 없습니다."/>}</div></div>
       </div>
     </section>
-    <aside className="right-rail">
-      <div className="panel calendar-panel"><div className="panel-head"><div><h3>일정 캘린더</h3><p>날짜별 메모를 직접 작성합니다.</p></div><button className="icon-btn" onClick={() => setEditing(true)}><Settings size={17}/></button></div>
-        <input className="calendar-input" type="date" value={selectedDate} onChange={e => setSelectedDate(e.target.value)} />
-      </div>
-      <div className="panel"><div className="panel-head"><div><h3>{selectedDate === today ? '오늘 일정' : '선택 날짜 일정'}</h3><p>{selectedDate}</p></div><button className="icon-btn" onClick={() => setEditing(true)}><Plus size={17}/></button></div>
-        <div className="schedule-list">{schedules.map(s => <div key={s.id}><span className="schedule-dot"/><p>{s.text}</p><button onClick={() => void removeSchedule(s.id)}><X size={15}/></button></div>)}{!schedules.length && <Empty text="등록된 일정이 없습니다." />}</div>
-      </div>
-      <div className="deadline-card"><CalendarDays size={22}/><div><small>월 마감 예정일</small><strong>{monthKey}-말일</strong></div></div>
+    <aside className="dashboard-side">
+      <div className="panel calendar-card"><div className="calendar-nav"><button onClick={()=>moveCal(-1)}><ChevronLeft size={16}/></button><b>{cy}년 {cm}월</b><button onClick={()=>moveCal(1)}><ChevronRight size={16}/></button></div><div className="calendar-week">{['일','월','화','수','목','금','토'].map(x=><span key={x}>{x}</span>)}</div><div className="calendar-grid">{cells.map((day,i)=>day===null?<span key={`e${i}`}/>:<button key={day} className={`${selectedDate===`${calendarMonth}-${String(day).padStart(2,'0')}`?'selected':''} ${store.schedules.some(s=>s.date===`${calendarMonth}-${String(day).padStart(2,'0')}`)?'has-event':''}`} onClick={()=>setSelectedDate(`${calendarMonth}-${String(day).padStart(2,'0')}`)}>{day}</button>)}</div></div>
+      <div className="panel today-card"><div className="panel-head"><div><h3>{selectedDate===today?'오늘 일정':'선택 날짜 일정'}</h3><p>{selectedDate}</p></div><button className="text-link" onClick={()=>setEditing(true)}>일정 추가</button></div><div className="timeline">{schedules.map(s=><div key={s.id}><time>{s.time||'시간 미정'}</time><span/><p>{s.text}</p><button onClick={()=>void removeSchedule(s.id)}><X size={14}/></button></div>)}{!schedules.length&&<Empty text="등록된 일정이 없습니다."/>}</div></div>
+      <div className="deadline-v27"><CalendarDays size={20}/><div><small>이번 달 마감 기한</small><input type="date" value={deadline} onChange={e=>void saveDeadline(e.target.value)}/><span>{daysLeft>=0?`D-${daysLeft}`:`D+${Math.abs(daysLeft)}`} 남음</span></div></div>
     </aside>
-    {editing && <Modal title={`${selectedDate} 일정 작성`} onClose={() => setEditing(false)}><textarea className="textarea" value={text} onChange={e => setText(e.target.value)} placeholder="예: 세금계산서 누락 거래처 확인" autoFocus/><button className="primary wide" onClick={() => void addSchedule()}>일정 저장</button></Modal>}
-  </div>
+    {editing&&<Modal title={`${selectedDate} 일정 추가`} onClose={()=>setEditing(false)}><div className="form-grid"><Field label="시간"><input type="time" value={scheduleTime} onChange={e=>setScheduleTime(e.target.value)}/></Field><Field label="일정"><input value={text} onChange={e=>setText(e.target.value)} placeholder="일정 내용을 입력하세요" autoFocus/></Field></div><button className="primary wide" onClick={()=>void addSchedule()}>일정 저장</button></Modal>}
+    {selectedChange&&<Modal title="단가 변동 내역" onClose={()=>setPriceDetailId(null)}><div className="price-change-detail"><b>{store.vendors.find(v=>v.id===selectedChange.item.vendorId)?.name} · {selectedChange.item.name}</b><div><span>{selectedChange.prev.yearMonth}<strong>{won(selectedChange.prev.price)}</strong></span><ChevronRight/><span>{selectedChange.latest.yearMonth}<strong>{won(selectedChange.latest.price)}</strong></span></div><p>변동액 {won(selectedChange.latest.price-selectedChange.prev.price)} · 변동률 {selectedChange.rate.toFixed(1)}%</p></div></Modal>}
+  </div>;
 }
+
+function DashboardCount({label,value,kind}:{label:string;value:number;kind:string}){return <div className={`dash-count ${kind}`}><small>{label}</small><strong>{value}</strong><span>건</span></div>}
+function AmountPanel({title,amount}:{title:string;amount:{goods:number;material:number;supply:number;tax:number;total:number}}){return <div className="panel amount-panel"><div className="panel-head"><div><h3>{title}</h3><p>매입세금계산서 집계장 기준</p></div></div><table><thead><tr><th>구분</th><th>공급가액</th><th>세액</th><th>합계</th></tr></thead><tbody><tr><td>상품 및 외주가공</td><td colSpan={2}>집계 포함</td><td>{won(amount.goods)}</td></tr><tr><td>부자재</td><td colSpan={2}>집계 포함</td><td>{won(amount.material)}</td></tr><tr className="total"><td>총 매입 합계</td><td>{won(amount.supply)}</td><td>{won(amount.tax)}</td><td>{won(amount.total)}</td></tr></tbody></table></div>}
 
 function MonthlyPage({ store, setStore, monthKey, locked }: { store: Store; setStore: (s: Store) => void; monthKey: string; locked: boolean }) {
   const [query, setQuery] = useState('');
@@ -590,6 +674,17 @@ function VendorsPage({ store, setStore }: { store: Store; setStore: (s: Store) =
     setStore({...store,vendors:store.vendors.filter(v=>v.id!==id)});
   };
   return <><div className="toolbar"><div className="toolbar-note">Supabase에 저장되는 거래처 기본정보입니다. 다른 PC에서도 동일하게 표시됩니다.</div><button className="primary" onClick={()=>{setMessage('');setForm(empty);setOpen(true)}}><Plus size={16}/> 거래처 등록</button></div><div className="panel table-panel"><table><thead><tr><th>구분</th><th>업체명</th><th>업체코드</th><th>대표자</th><th>업태</th><th>업종</th><th>등록번호</th><th></th></tr></thead><tbody>{store.vendors.map(v=><tr key={v.id}><td><span className="category-chip">{v.category}</span></td><td><b>{v.name}</b></td><td>{v.code}</td><td>{v.ceo}</td><td>{v.businessType}</td><td>{v.businessItem}</td><td>{v.registrationNo}</td><td><div className="row-actions"><button onClick={()=>edit(v)}>수정</button><button className="danger" onClick={()=>void remove(v.id)}>삭제</button></div></td></tr>)}</tbody></table>{!store.vendors.length && <Empty text="등록된 거래처가 없습니다. 거래처 등록 버튼을 눌러 추가하세요." />}</div>{open&&<Modal title={form.id?'거래처 정보 수정':'거래처 등록'} onClose={()=>!saving&&setOpen(false)}><div className="form-grid"><Field label="구분"><select value={form.category} onChange={e=>setForm({...form,category:e.target.value as Category})}><option>부자재</option><option>상품 및 외주가공</option></select></Field><Field label="업체명"><input value={form.name} onChange={e=>setForm({...form,name:e.target.value})}/></Field><Field label="업체코드"><input value={form.code} onChange={e=>setForm({...form,code:e.target.value})}/></Field><Field label="대표자"><input value={form.ceo} onChange={e=>setForm({...form,ceo:e.target.value})}/></Field><Field label="업태"><input value={form.businessType} onChange={e=>setForm({...form,businessType:e.target.value})}/></Field><Field label="업종"><input value={form.businessItem} onChange={e=>setForm({...form,businessItem:e.target.value})}/></Field><Field label="등록번호"><input value={form.registrationNo} onChange={e=>setForm({...form,registrationNo:e.target.value})}/></Field></div>{message&&<p style={{color:'#c2410c',margin:'12px 0 0'}}>{message}</p>}<button className="primary wide" disabled={saving} onClick={()=>void save()}>{saving?'저장 중...':'저장'}</button></Modal>}</>;
+}
+
+function PricesPage({ store, setStore }: { store: Store; setStore: (s: Store) => void }) {
+  const [vendorId,setVendorId]=useState(store.vendors[0]?.id??'');
+  const [itemName,setItemName]=useState(''); const [unit,setUnit]=useState('');
+  const [editingItem,setEditingItem]=useState<PriceItem|null>(null); const [yearMonth,setYearMonth]=useState(currentKey); const [price,setPrice]=useState(''); const [note,setNote]=useState('');
+  const items=store.priceItems.filter(i=>i.vendorId===vendorId);
+  const addItem=async()=>{if(!vendorId||!itemName.trim())return;const{data,error}=await supabase.from('vendor_price_items').insert({vendor_id:vendorId,item_name:itemName.trim(),unit:unit.trim()}).select().single();if(error){alert(`품목 저장 실패: ${error.message}`);return;}setStore({...store,priceItems:[...store.priceItems,{id:data.id,vendorId:data.vendor_id,name:data.item_name,unit:data.unit??''}]});setItemName('');setUnit('');};
+  const addPrice=async()=>{if(!editingItem||!yearMonth||!price)return;const payload={price_item_id:editingItem.id,year_month:yearMonth,price:Number(price),note};const{data,error}=await supabase.from('vendor_price_history').upsert(payload,{onConflict:'price_item_id,year_month'}).select().single();if(error){alert(`단가 저장 실패: ${error.message}`);return;}const row={id:data.id,itemId:data.price_item_id,yearMonth:data.year_month,price:Number(data.price),note:data.note??''};setStore({...store,priceHistory:[...store.priceHistory.filter(h=>!(h.itemId===row.itemId&&h.yearMonth===row.yearMonth)),row]});setPrice('');setNote('');};
+  const removeItem=async(item:PriceItem)=>{if(!confirm(`${item.name} 품목과 단가 이력을 삭제할까요?`))return;const{error}=await supabase.from('vendor_price_items').delete().eq('id',item.id);if(error){alert(`삭제 실패: ${error.message}`);return;}setStore({...store,priceItems:store.priceItems.filter(i=>i.id!==item.id),priceHistory:store.priceHistory.filter(h=>h.itemId!==item.id)});};
+  return <><div className="toolbar"><select value={vendorId} onChange={e=>setVendorId(e.target.value)}>{store.vendors.map(v=><option key={v.id} value={v.id}>{v.name}</option>)}</select><div className="toolbar-note">거래처별 품목과 연월별 단가를 관리합니다.</div></div><div className="price-layout"><div className="panel"><div className="panel-head"><div><h3>품목 등록</h3><p>한 거래처에 여러 품목을 추가할 수 있습니다.</p></div></div><div className="form-grid"><Field label="품목명"><input value={itemName} onChange={e=>setItemName(e.target.value)} placeholder="예: 공업용 랩"/></Field><Field label="단위"><input value={unit} onChange={e=>setUnit(e.target.value)} placeholder="예: 롤, kg, 장"/></Field></div><button className="primary wide" onClick={()=>void addItem()}><Plus size={15}/> 품목 추가</button></div><div className="panel table-panel"><table><thead><tr><th>품목명</th><th>단위</th><th>최근 단가</th><th>최근 적용월</th><th></th></tr></thead><tbody>{items.map(item=>{const hs=store.priceHistory.filter(h=>h.itemId===item.id).sort((a,b)=>b.yearMonth.localeCompare(a.yearMonth));return <tr key={item.id}><td><b>{item.name}</b></td><td>{item.unit||'-'}</td><td>{hs[0]?won(hs[0].price):'-'}</td><td>{hs[0]?.yearMonth??'-'}</td><td><div className="row-actions"><button onClick={()=>setEditingItem(item)}>단가 입력</button><button className="danger" onClick={()=>void removeItem(item)}>삭제</button></div></td></tr>})}</tbody></table>{!items.length&&<Empty text="등록된 품목이 없습니다."/>}</div></div>{editingItem&&<Modal title={`${editingItem.name} 단가 이력`} onClose={()=>setEditingItem(null)} wide><div className="form-grid"><Field label="적용 연월"><input type="month" value={yearMonth} onChange={e=>setYearMonth(e.target.value)}/></Field><Field label="단가"><input type="number" value={price} onChange={e=>setPrice(e.target.value)} placeholder="0"/></Field><Field label="비고"><input value={note} onChange={e=>setNote(e.target.value)}/></Field></div><button className="primary wide" onClick={()=>void addPrice()}>단가 저장</button><div className="price-history"><h4>변동 이력</h4>{store.priceHistory.filter(h=>h.itemId===editingItem.id).sort((a,b)=>b.yearMonth.localeCompare(a.yearMonth)).map((h,i,arr)=>{const prev=arr[i+1];return <div key={h.id}><span>{h.yearMonth}</span><b>{won(h.price)}</b><em>{prev?`${h.price-prev.price>=0?'+':''}${won(h.price-prev.price)}`:'최초'}</em></div>})}</div></Modal>}</>;
 }
 
 function ContactsPage({ store, setStore }: { store: Store; setStore: (s: Store) => void }) {
